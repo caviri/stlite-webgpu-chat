@@ -54,6 +54,8 @@ if "selected_model" not in st.session_state:
     st.session_state.selected_model = "TinyLlama Chat 1.1B"
 if "system_prompt" not in st.session_state:
     st.session_state.system_prompt = "You are a helpful and friendly AI assistant."
+if "thinking" not in st.session_state:
+    st.session_state.thinking = False
 
 # Sidebar for model management
 with st.sidebar:
@@ -113,6 +115,7 @@ with st.sidebar:
         if len(st.session_state.current_conversation) > 0:
             st.session_state.conversations.append(st.session_state.current_conversation)
         st.session_state.current_conversation = []
+        st.session_state.thinking = False
         st.rerun()
 
 # Main chat interface
@@ -123,55 +126,78 @@ for message in st.session_state.current_conversation:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
+# Show thinking spinner if model is generating a response
+if st.session_state.thinking:
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            st.write("Generating a response...")
+
+# Process when we have a new prompt
+async def process_prompt(prompt):
+    # Add user message to conversation
+    st.session_state.current_conversation.append({"role": "user", "content": prompt})
+    
+    # Set thinking state to show spinner
+    st.session_state.thinking = True
+    st.rerun()
+
+# Handle model response generation
+async def generate_response():
+    try:
+        pipe = st.session_state["pipe"]
+        
+        # Get the last user message
+        last_user_msg = next((msg["content"] for msg in reversed(st.session_state.current_conversation) 
+                             if msg["role"] == "user"), "")
+        
+        # Format messages for LLM chat models
+        if "TinyLlama" in st.session_state.selected_model or "Gemma" in st.session_state.selected_model:
+            # Format messages for chat models
+            messages = [
+                {"role": "system", "content": st.session_state.system_prompt}
+            ]
+            
+            # Add conversation history
+            for msg in st.session_state.current_conversation:
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            response = await pipe(messages, {"max_new_tokens": 500})
+            assistant_response = response[0]["generated_text"][-1]["content"]
+        else:
+            # For regular text generation models, just use the prompt
+            response = await pipe(last_user_msg, {"max_length": 200})
+            assistant_response = response[0]["generated_text"]
+        
+        # Add assistant response to conversation
+        st.session_state.current_conversation.append({
+            "role": "assistant",
+            "content": assistant_response
+        })
+        
+        # Clear thinking state
+        st.session_state.thinking = False
+    except Exception as e:
+        # Add error message to conversation
+        st.session_state.current_conversation.append({
+            "role": "assistant",
+            "content": f"Error: {str(e)}"
+        })
+        st.session_state.thinking = False
+
 # Chat input
 if prompt := st.chat_input("What would you like to say?"):
     if not st.session_state.model_loaded:
         st.error("Please load the model first!")
     else:
-        # Add user message to conversation
-        st.session_state.current_conversation.append({"role": "user", "content": prompt})
-        
-        # Display user message
-        with st.chat_message("user"):
-            st.write(prompt)
-        
-        # Generate response
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                pipe = st.session_state["pipe"]
-                
-                try:
-                    # Format messages for LLM chat models
-                    if "TinyLlama" in st.session_state.selected_model or "Gemma" in st.session_state.selected_model:
-                        # Format messages for chat models
-                        messages = [
-                            {"role": "system", "content": st.session_state.system_prompt}
-                        ]
-                        
-                        # Add conversation history
-                        for msg in st.session_state.current_conversation:
-                            messages.append({
-                                "role": msg["role"],
-                                "content": msg["content"]
-                            })
-                        
-                        response = await pipe(messages, {"max_new_tokens": 500})
-                        assistant_response = response[0]["generated_text"][-1]["content"]
-                    else:
-                        # For regular text generation models, just use the prompt
-                        response = await pipe(prompt, {"max_length": 200})
-                        assistant_response = response[0]["generated_text"]
-                    
-                    # Display the response
-                    st.write(assistant_response)
-                    
-                    # Add assistant response to conversation
-                    st.session_state.current_conversation.append({
-                        "role": "assistant",
-                        "content": assistant_response
-                    })
-                except Exception as e:
-                    st.error(f"Error generating response: {str(e)}")
+        # Process the prompt asynchronously
+        asyncio.create_task(process_prompt(prompt))
+
+# Check if we need to generate a response
+if st.session_state.thinking and st.session_state.model_loaded:
+    asyncio.create_task(generate_response())
 
 # Model status
 st.sidebar.markdown("---")
@@ -180,6 +206,11 @@ if st.session_state.model_loaded:
     st.sidebar.success(f"Model: {st.session_state.selected_model}")
     model_id = MODEL_OPTIONS[st.session_state.selected_model]
     st.sidebar.info(f"Model ID: {model_id}")
+    
+    if st.session_state.thinking:
+        st.sidebar.warning("Status: Generating response...")
+    else:
+        st.sidebar.success("Status: Ready")
 else:
     st.sidebar.warning("No model loaded")
 `,
